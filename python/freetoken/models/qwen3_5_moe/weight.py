@@ -15,6 +15,7 @@ from freetoken.models.loader import (
     ct_bf16_fuse,
     ct_nvfp4_fuse,
     drop_page_cache,
+    has_moe_experts,
     iter_weight_files,
     nvfp4_parts_ct,
 )
@@ -179,9 +180,11 @@ def iter_weights(
 ) -> Iterator[tuple[str, torch.Tensor]]:
     hf_config = cached_load_hf_config(model_path)
     config = parse_config(hf_config)
-    if _compressed_tensors_nvfp4(hf_config):
+    if _compressed_tensors_nvfp4(hf_config) and not has_moe_experts(model_path):
         # Dense compressed-tensors NVFP4 (e.g. Qwen3.6-27B): attn (q/k/v/o, GDN out_proj) +
-        # dense MLP are W4A16 NVFP4; GDN in_proj_*, lm_head, norms bf16.
+        # dense MLP are W4A16 NVFP4; GDN in_proj_*, lm_head, norms bf16. MoE compressed-tensors
+        # checkpoints (e.g. Qwen3.6-35B-A3B quantized with llm-compressor instead of modelopt)
+        # fall through to the modelopt branch below -- it has the offload expert bank.
         yield from _iter_weights_compressed_tensors(
             model_path, device,
             include_non_moe=include_non_moe, include_moe_experts=include_moe_experts,

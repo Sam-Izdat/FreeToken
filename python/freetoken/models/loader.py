@@ -9,6 +9,7 @@ from typing import Iterable, Iterator
 
 import torch
 from freetoken.utils import div_ceil, download_hf_weight
+import struct
 
 SPLIT_DIM_0 = (".q_proj", ".k_proj", ".v_proj", ".gate_proj", ".up_proj")
 SPLIT_DIM_1 = (".o_proj", ".down_proj")
@@ -51,6 +52,41 @@ def iter_weight_files(model_path: str) -> list[str]:
     model_folder = download_hf_weight(model_path)
     files = glob.glob(f"{model_folder}/*.safetensors")
     return [f for f in files if not f.endswith("consolidated.safetensors")] or files
+
+
+def has_moe_experts(model_path: str) -> bool:
+    """Return True if the on-disk checkpoint declares any routed (MoE) experts.
+
+    Detects the two layouts FreeToken serves:
+      - modelopt: ``model.language_model.layers.N.mlp.experts.E.<proj>`` per-expert keys
+      - stacked:  ``model.layers.N.mlp.experts.gate_up_proj`` / ``.down_proj`` pre-fused keys
+
+    Used to disambiguate compressed-tensors NVFP4 checkpoints that look dense to the
+    config-side detector but actually carry routed experts on disk (e.g. a Qwen3.6-35B-A3B
+    quantized with llm-compressor instead of modelopt). Cheap: reads only the safetensors
+    header (or the index.json weight_map) -- no tensor data is touched.
+    """
+    model_folder = download_hf_weight(model_path)
+    index_path = os.path.join(model_folder, "model.safetensors.index.json")
+    # Pattern matches either layout; the index path is checked first because it covers
+    # all shards without re-opening safetensors files.
+    expert_re = re.compile(r"\.mlp\.experts\.(\d+|gate_up_proj|down_proj)\b")
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as f:
+            for k in json.load(f).get("weight_map", {}):
+                if expert_re.search(k):
+                    return True
+        return False
+    # Single-file checkpoint: read the safetensors header (8-byte length + JSON metadata)
+    # to enumerate the keys without loading tensor payloads.
+    safetensor_files = [f for f in glob.glob(os.path.join(model_folder, "*.safetensors"))
+                        if not f.endswith("consolidated.safetensors")]
+    if not safetensor_files:
+        return False
+    with open(safetensor_files[0], "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+    return any(expert_re.search(k) for k in header)
 
 
 def drop_page_cache(path: str) -> None:
@@ -431,6 +467,7 @@ def stream_moe_expert_sources(
 
 __all__ = [
     "MergeRule",
+    "has_moe_experts",
     "iter_root_safetensor_files_from_index",
     "iter_weight_files",
     "iter_merged_tensors",

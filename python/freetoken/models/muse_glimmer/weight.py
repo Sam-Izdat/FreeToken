@@ -11,6 +11,7 @@ from freetoken.models.loader import (
     ShardReader,
     ct_bf16_fuse,
     ct_nvfp4_fuse,
+    has_moe_experts,
     iter_weight_files,
     nvfp4_parts_ct,
 )
@@ -62,7 +63,10 @@ def iter_weights(
     if get_tp_info().size > 1:
         raise NotImplementedError("muse_glimmer weight loading currently supports TP=1 only")
 
-    if detect_compressed_tensors_nvfp4(cached_load_hf_config(model_path)):
+    if detect_compressed_tensors_nvfp4(cached_load_hf_config(model_path)) \
+            and not has_moe_experts(model_path):
+        # MoE compressed-tensors checkpoints fall through to the non-compressed-tensors
+        # branch below, which dispatches the routed experts to the offload cache.
         yield from _iter_weights_compressed_tensors(model_path, device)
         return
 
