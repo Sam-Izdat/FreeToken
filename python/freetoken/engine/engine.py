@@ -273,14 +273,19 @@ def _materialize_loaded_weight_state_dict(
     weights: Iterable[Tuple[str, torch.Tensor]],
     *,
     device: torch.device,
+    cpu_substrings: tuple[str, ...] = (),
 ) -> Dict[str, torch.Tensor]:
     state_dict: Dict[str, torch.Tensor] = {}
     for key, weight in weights:
         expected = model_state.get(key)
+        # Model-opted CPU residency (e.g. K2-Horizon's 15 GB MoVA value-expert
+        # block, which exceeds small-GPU VRAM): matching keys skip the GPU
+        # move and stay on host. The owning module shuttles activations.
+        target = torch.device("cpu") if any(s in key for s in cpu_substrings) else device
         if expected is None:
-            state_dict[key] = weight.to(device=device)
+            state_dict[key] = weight.to(device=target)
         else:
-            state_dict[key] = weight.to(device=device, dtype=expected.dtype)
+            state_dict[key] = weight.to(device=target, dtype=expected.dtype)
     return state_dict
 
 
@@ -462,6 +467,15 @@ class Engine:
         model_state = self.model.state_dict()
         if config.use_dummy_weight:
             return _make_dummy_weight_state_dict(model_state, device=self.device)
+        # Per-model CPU residency: the model module may define CPU_WEIGHT_SUBSTRINGS
+        # (key substrings kept on host, e.g. K2-Horizon's MoVA value experts).
+        # Absent elsewhere -- default () preserves existing behavior exactly.
+        from freetoken.models.register import get_model_spec
+        import importlib
+        spec = get_model_spec(config.model_config.architectures[0])
+        cpu_substrings: tuple[str, ...] = tuple(
+            getattr(importlib.import_module(spec.module), "CPU_WEIGHT_SUBSTRINGS", ())
+        )
         # _materialize casts each loaded tensor to its model-param dtype (model_state), so
         # models declaring per-tensor dtypes (e.g. DSV4's mixed fp8/fp32/bf16) are preserved;
         # offload models exclude experts (served from the offload cache, not dense weights).
@@ -473,6 +487,7 @@ class Engine:
                 include_moe_experts=not is_offload_moe_backend(config.moe_backend),
             ),
             device=self.device,
+            cpu_substrings=cpu_substrings,
         )
 
     def _resolve_auto_moe_cache_size(self, config: EngineConfig, banks) -> tuple[int, int, bool]:

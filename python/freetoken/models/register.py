@@ -143,6 +143,14 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         "freetoken.models.glm5_next",
         "Glm5NextForCausalLM",
     ),
+    # K2-Horizon-MoVA (IFM): 48-layer MoE (sigmoid+bias top-8 of 100, 2.5x) +
+    # MoVA routed-value attention (sigmoid+bias top-4 of 64, BF16) on layers
+    # 3..47; dense SwiGLU + GQA on 0..2. NVFP4 routed experts served from the
+    # offload cache (llm-compressor layout, global_reciprocal via naming heuristic).
+    "K2HorizonForCausalLM": ModelSpec(
+        "freetoken.models.k2_horizon",
+        "K2HorizonForCausalLM",
+    ),
 }
 
 
