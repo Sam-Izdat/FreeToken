@@ -21,7 +21,12 @@ class EngineConfig:
     max_running_req: int = 4
     attention_backend: str = "auto"
     moe_backend: str = "auto"
-    # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
+    # MoVA value-expert placement (--mova-backend): auto|cpu|gpu. "auto" runs the
+    # CpuMovaExecutor host-node iff the model reports CPU-resident v_experts
+    # (needs_mova_executor), else the pure-GPU loop (GPU-resident v_experts on
+    # big-VRAM systems). "cpu" forces the executor (fails loudly if the
+    # weights are GPU-resident); "gpu" forces the GPU loop.
+    mova_backend: str = "auto"
     nvfp4_backend: str = "triton"
     # PLE table backend: "disk" (default) reads rows from the checkpoint files per fill, "pinned" preloads the table into page-locked host RAM.
     ple_backend: str = "disk"

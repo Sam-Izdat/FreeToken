@@ -176,27 +176,49 @@ class K2HorizonMoVAAttention(_K2HorizonAttentionBase):
         self.v_experts = OPList([LinearReplicated(config.hidden_size, self.kv_attn_dim, has_bias=False)
                                  for _ in range(self.num_value_experts)])
         self._router_scaling = config.routed_scaling_factor
+        # Host-node CPU executor for CPU-resident v_experts (attached by the
+        # engine via set_mova_executor). None -> pure-GPU Python loop (used
+        # when v_experts fit VRAM, and by tests driving the module directly).
+        self._mova_executor = None
 
     def _route_values(self, x: torch.Tensor) -> torch.Tensor:
-        # v_router + v_experts live on host (CPU_WEIGHT_SUBSTRINGS; the 15 GB
-        # block exceeds 12 GB VRAM). Shuttle: input GPU->CPU once, route + GEMM
-        # on CPU in the checkpoint dtype, value vectors CPU->GPU for the GPU
-        # attention backend + KV cache. Decode traffic is ~7 KB/token/layer.
-        # Device follows the router weight (robust if placement ever changes).
-        in_device = x.device
+        # Router runs on GPU (v_router is 0.3 MB; always GPU-resident). The
+        # value-expert dispatch follows weight placement:
+        #  * GPU-resident v_experts (big-VRAM systems): pure-GPU Python loop.
+        #  * CPU-resident v_experts (this box): CpuMovaExecutor host-node
+        #    (graph-capturable cudaLaunchHostFunc submit/sync + pinned IO;
+        #    see moe/cpu_mova_executor.py). Attached by the engine.
         in_dtype = x.dtype
-        cpu_device = self.v_router.weight.device
-        flat = x.reshape(-1, x.shape[-1]).to(cpu_device)
-        router_logits = self.v_router.forward(flat)
-        bias = self.v_router.bias
+        flat = x.reshape(-1, x.shape[-1])
+        # Raw value-router logits WITHOUT the bias (HF: F.linear(x, W)); the bias
+        # steers top-k selection only. LinearReplicated(fwd) would add it here.
+        router_logits = torch.nn.functional.linear(flat, self.v_router.weight)
         routing_weights, selected = calc_router_weights(
-            router_logits, bias, top_k=self.num_value_experts_per_tok,
+            router_logits, self.v_router.bias, top_k=self.num_value_experts_per_tok,
             scaling_factor=self._router_scaling,
         )
-        # Selected-expert dispatch, mirroring combine_routed_experts in the
-        # reference: per-expert mask -> project -> silu -> weight -> index_add_.
+        executor = self._mova_executor
+        if executor is not None:
+            # Host-node path: same TopK contract as the MoE executor
+            # (fp32 weights, int32 ids). Returns GPU [N, kv_dim].
+            v = executor.decode(self.layer_id, flat, routing_weights,
+                                selected.to(torch.int32))
+            return v.to(in_dtype)
+        return self._route_values_gpu_loop(flat, routing_weights, selected).to(in_dtype)
+
+    def _route_values_gpu_loop(
+        self, flat: torch.Tensor,
+        routing_weights: torch.Tensor, selected: torch.Tensor,
+    ) -> torch.Tensor:
+        # GPU-resident (or test-driven) fallback: per-expert mask -> project ->
+        # silu -> weight -> index_add_, mirroring combine_routed_experts in the
+        # reference. Runs on whatever device the weights live on.
+        dev = self.v_experts.op_list[0].weight.device
+        flat = flat.to(dev)
+        routing_weights = routing_weights.to(dev)
+        selected = selected.to(dev)
         out = torch.zeros(flat.shape[0], self.kv_attn_dim,
-                          dtype=flat.dtype, device=flat.device)
+                          dtype=flat.dtype, device=dev)
         expert_mask = F.one_hot(selected, num_classes=self.num_value_experts).permute(2, 1, 0)
         hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)), as_tuple=False).flatten()
         for expert_idx in hit:
@@ -206,7 +228,7 @@ class K2HorizonMoVAAttention(_K2HorizonAttentionBase):
             expert_out = F.silu(expert_out)
             expert_out = expert_out * routing_weights[tok_pos, topk_pos, None].to(expert_out.dtype)
             out.index_add_(0, tok_pos, expert_out.to(out.dtype))
-        return out.contiguous().to(device=in_device, dtype=in_dtype)
+        return out.contiguous()
 
     def _qkv(self, x: torch.Tensor):
         positions = get_global_ctx().batch.positions

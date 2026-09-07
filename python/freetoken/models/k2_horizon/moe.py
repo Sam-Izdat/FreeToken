@@ -89,7 +89,11 @@ class K2HorizonSparseMoeBlock(BaseOP):
         # Shared expert first: the fused MoE kernel may write into its input
         # in place (HF also evaluates the shared expert first).
         shared = self.shared_experts.forward(flat)
-        router_logits = self.gate.forward(flat)
+        # Raw logits WITHOUT the gate bias: HF computes F.linear(x, W) and adds
+        # the bias only to the top-k SELECTION scores (routing_weights_for_choice),
+        # never to the logits. LinearReplicated(fwd) would add bias here; bypass
+        # it and let calc_router_weights apply the bias to selection only.
+        router_logits = torch.nn.functional.linear(flat, self.gate.weight)
         topk_weights, topk_ids = calc_router_weights(
             router_logits, self.gate.bias,
             top_k=self._top_k, scaling_factor=self._router_scaling,

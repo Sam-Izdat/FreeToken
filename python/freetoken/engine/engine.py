@@ -346,8 +346,10 @@ class Engine:
             self._host_tables_bytes = int(self.model.load_host_tables(config) or 0)
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
+        self._init_cpu_mova_executor(config)
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
+
 
         # ======================= KV cache initialization ========================
         new_free = self._sync_get_memory()[1]
@@ -435,6 +437,38 @@ class Engine:
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+
+    def _init_cpu_mova_executor(self, config: EngineConfig) -> None:
+        """Build the CPU MoVA value-expert executor (host-node, graph-safe).
+
+        Generic opt-in: models exposing ``needs_mova_executor``/``set_mova_executor``
+        (currently K2-Horizon) get a ``CpuMovaExecutor`` iff ``mova_backend`` says
+        so (auto = only when v_experts are CPU-resident). Must run before CUDA
+        graph capture (worker pool live for warmup; pinned IO/task pointers
+        stable for captured nodes). No-op for every other architecture.
+        """
+        self.cpu_mova_executor = None
+        needs = getattr(self.model, "needs_mova_executor", None)
+        setter = getattr(self.model, "set_mova_executor", None)
+        if needs is None or setter is None:
+            return
+        want = config.mova_backend
+        if want == "gpu":
+            return
+        if want == "auto" and not needs():
+            return
+        from freetoken.moe.cpu_mova_executor import CpuMovaExecutor
+
+        max_tokens = max(config.max_running_req, config.cuda_graph_max_bs or 0, 1)
+        executor = CpuMovaExecutor(
+            self.model,
+            top_k=4,
+            num_threads=0,
+            max_tokens=max_tokens,
+            device=self.device,
+        )
+        setter(executor)
+        self.cpu_mova_executor = executor
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:

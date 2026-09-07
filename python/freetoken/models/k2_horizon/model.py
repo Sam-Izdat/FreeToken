@@ -113,5 +113,28 @@ class K2HorizonForCausalLM(BaseLLMModel):
         output = self.model.forward(get_global_ctx().batch.input_ids)
         return self.lm_head.forward(output)
 
+    def needs_mova_executor(self) -> bool:
+        """True when any MoVA ``v_experts`` weight is host-resident (CPU).
+        The engine uses this (``mova_backend=auto``) to decide whether to
+        construct the ``CpuMovaExecutor``. GPU-resident v_experts need no
+        executor (the attention runs the pure-GPU loop)."""
+        for layer in self.model.layers.op_list:
+            experts = getattr(layer.self_attn, "v_experts", None)
+            if experts is None:
+                continue
+            for expert in experts.op_list:
+                if expert.weight.device.type == "cpu":
+                    return True
+        return False
+
+    def set_mova_executor(self, executor) -> None:
+        """Attach a ``CpuMovaExecutor`` to every MoVA attention layer.
+        Called by the engine after weight load (generic opt-in hook; None
+        clears back to the GPU loop)."""
+        for layer in self.model.layers.op_list:
+            attn = layer.self_attn
+            if hasattr(attn, "_mova_executor"):
+                attn._mova_executor = executor
+
 
 __all__ = ["K2HorizonForCausalLM"]

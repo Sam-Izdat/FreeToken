@@ -31,5 +31,6 @@ __all__ = [
 ]
 
 # Key substrings kept on host (see engine._materialize_loaded_weight_state_dict):
-# the 15 GB MoVA value-expert block + its router. Everything else serves from GPU.
-CPU_WEIGHT_SUBSTRINGS = (".self_attn.v_router.", ".self_attn.v_experts.")
+# the 15 GB MoVA value-expert block. v_router (0.3 MB) stays GPU-resident so
+# routing runs on-device; the CpuMovaExecutor takes GPU activations + routing.
+CPU_WEIGHT_SUBSTRINGS = (".self_attn.v_experts.",)

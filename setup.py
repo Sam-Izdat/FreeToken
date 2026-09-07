@@ -64,6 +64,24 @@ setup(
             libraries=["cudart"],
             extra_compile_args=["-O3", "-std=c++17", "-pthread"],
         ),
+        # CPU-compute MoVA value-expert executor (K2-Horizon's 15GB v_experts on
+        # small-VRAM boxes). Same host-node design as _cpu_moe (cudaLaunchHostFunc
+        # submit/sync so decode stays inside one CUDA graph, persistent worker
+        # pool, bf16 GEMV with runtime ISA dispatch) but a focused subset: a
+        # single 2560->1024 bf16 GEMV per route + silu + weighted sum, bf16 only.
+        # No flag-handshake/coordinator: MoVA's CPU GEMV is ~ms-scale per layer,
+        # which dwarfs the ~30-50us host-func dispatch (the handshake only pays
+        # off when the CPU op is fast enough that dispatch dominates).
+        CppExtension(
+            name="freetoken.kernel._cpu_mova",
+            sources=[
+                "python/freetoken/kernel/csrc/cpu_mova/cpu_mova_ext.cpp",
+            ],
+            include_dirs=cuda_include_dirs,
+            library_dirs=cuda_library_dirs,
+            libraries=["cudart"],
+            extra_compile_args=["-O3", "-std=c++17", "-pthread"],
+        ),
         # --ple-backend disk row store; Linux-only until the TableFile/BatchReader seams grow Windows bodies
         *([
             CppExtension(

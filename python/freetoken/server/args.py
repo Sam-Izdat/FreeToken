@@ -478,6 +478,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--mova-backend",
+        default=ServerArgs.mova_backend,
+        choices=["auto", "cpu", "gpu"],
+        help=(
+            "MoVA value-expert placement (K2-Horizon). 'auto' runs the "
+            "CpuMovaExecutor host-node iff the model reports CPU-resident "
+            "v_experts, else the pure-GPU loop; 'cpu' forces the executor, "
+            "'gpu' forces the GPU loop."
+        ),
+    )
+    parser.add_argument(
         "--ple-backend",
         default=ServerArgs.ple_backend,
         choices=["pinned", "disk"],
