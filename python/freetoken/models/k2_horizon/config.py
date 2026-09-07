@@ -118,15 +118,14 @@ def parse_config(hf_config: Any) -> ModelConfig:
         vision_config=None,
         image_token_id=None,
         attention_groups=(full_group,),
-        # Quantization: only the routed experts carry NVFP4. Everything else
-        # (MoVA v_experts, attention projections, shared experts, dense MLP,
-        # lm_head, embed_tokens, norms) is BF16. The model card's
-        # quantization_config is a single NVFP4 group targeting
-        # ``mlp.experts.*``; the model's own ignore list exempts the rest.
+        # Quantization: routed experts are NVFP4 (bank loader). Dense attention
+        # q/k/v/o/gate + shared-expert + dense-MLP projections are FP8-dense
+        # (W8A16, absmax per-row at load, no calibration) via make_replicated.
+        # Routers (MoE gate, v_router), embed, norms, MoVA v_experts stay bf16.
         expert_quant="nvfp4",
-        attn_quant="none",
-        dense_quant="none",
-        lm_head_quant="none",
+        attn_quant="fp8_pertensor",
+        dense_quant="fp8_pertensor",
+        lm_head_quant="fp8_pertensor",
         # llm-compressor NVFP4 stores the QUANT-side per-tensor scale; the
         # bank loader reciprocates 1/x at ingest when the on-disk naming
         # carries ``weight_packed`` (heuristic in models/config.py).

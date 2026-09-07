@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer, silu_and_mul
+from freetoken.models.quant_linear import make_replicated
 
 from .attention import calc_router_weights
 
@@ -39,9 +40,9 @@ class K2HorizonSharedExpert(BaseOP):
 
     def __init__(self, config: ModelConfig):
         hidden, inter = config.hidden_size, config.moe_intermediate_size
-        self.gate_proj = LinearReplicated(hidden, inter, has_bias=False)
-        self.up_proj = LinearReplicated(hidden, inter, has_bias=False)
-        self.down_proj = LinearReplicated(inter, hidden, has_bias=False)
+        self.gate_proj = make_replicated(config, hidden, inter)
+        self.up_proj = make_replicated(config, hidden, inter)
+        self.down_proj = make_replicated(config, inter, hidden)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = torch.cat(
@@ -55,9 +56,9 @@ class K2HorizonDenseMLP(BaseOP):
 
     def __init__(self, config: ModelConfig):
         hidden, inter = config.hidden_size, config.intermediate_size
-        self.gate_proj = LinearReplicated(hidden, inter, has_bias=False)
-        self.up_proj = LinearReplicated(hidden, inter, has_bias=False)
-        self.down_proj = LinearReplicated(inter, hidden, has_bias=False)
+        self.gate_proj = make_replicated(config, hidden, inter)
+        self.up_proj = make_replicated(config, hidden, inter)
+        self.down_proj = make_replicated(config, inter, hidden)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = torch.cat(

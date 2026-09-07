@@ -63,12 +63,30 @@ _NVFP4_SOURCE_SPEC = Nvfp4ExpertSourceSpec(
     layer_to_bank=lambda layer, config: layer - config.first_k_dense_replace,
     desc="K2-Horizon NVFP4 experts",
 )
-# Quant-scale suffixes consumed with their weight, never yielded alone.
-# (``weight_packed`` is matched by _NVFP4_EXPERT_RE above; the rest land here.)
 _SCALE_SUFFIXES = (
     ".weight_scale", ".weight_global_scale",
     ".input_scale", ".input_global_scale",
 )
+
+# Dense projections served FP8-W8A16 (absmax per-row at load, no calibration):
+# attention q/k/v/o/gate on every layer, shared-expert gate/up/down on sparse
+# layers, dense-MLP gate/up/down on layers 0..2, and lm_head. Routers (MoE
+# gate, v_router), embed, norms, MoVA v_experts stay bf16.
+_FP8_DENSE_RE = re.compile(
+    r"^model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj|gate_proj)\.weight$"
+    r"|^model\.layers\.(?:[3-9]|[1-3]\d|4[0-7])\.mlp\.shared_experts\.(gate_proj|up_proj|down_proj)\.weight$"
+    r"|^model\.layers\.[0-2]\.mlp\.(gate_proj|up_proj|down_proj)\.weight$"
+    r"|^lm_head\.weight$"
+)
+_FP8_MAX = 448.0
+
+
+def _quant_fp8_per_row(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-output-row fp8-e4m3 quant (same grid as glm_moe_dsa): w ~= q * scale."""
+    wf = w.float()
+    scale = (wf.abs().amax(dim=1) / _FP8_MAX).clamp(min=1e-12)
+    q = (wf / scale[:, None]).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+    return q, scale.to(torch.float32)
 
 
 def _rename(raw_name: str) -> str | None:
@@ -103,13 +121,17 @@ def iter_weights(
                 # Routed NVFP4 experts -> offload cache, not the dense pass.
                 if _NVFP4_EXPERT_RE.search(raw_name):
                     continue
-                # Standalone quant scales are consumed with their weight.
-                if raw_name.endswith(_SCALE_SUFFIXES):
-                    continue
                 name = _rename(raw_name)
                 if name is None:
                     continue
-                yield name, f.get_tensor(raw_name)
+                tensor = f.get_tensor(raw_name)
+                # FP8-dense targets: quantize at load, yield weight + scale.
+                if _FP8_DENSE_RE.match(name):
+                    q, scale = _quant_fp8_per_row(tensor)
+                    yield name, q
+                    yield name + "_scale", scale
+                    continue
+                yield name, tensor
 
 
 def iter_weights_parallel(

@@ -33,6 +33,7 @@ import torch
 import torch.nn.functional as F
 from freetoken.core import get_global_ctx
 from freetoken.layers import BaseOP, LinearReplicated, OPList
+from freetoken.models.quant_linear import make_replicated
 
 from freetoken.layers.rotary import get_rope
 from freetoken.utils import nvtx_annotate
@@ -91,16 +92,13 @@ class _K2HorizonAttentionBase(BaseOP):
         self.head_dim = config.head_dim
         self.qo_attn_dim = self.num_q * self.head_dim
         self.kv_attn_dim = self.num_kv * self.head_dim
-
-        self.q_proj = LinearReplicated(config.hidden_size, self.qo_attn_dim, has_bias=False)
-        self.k_proj = LinearReplicated(config.hidden_size, self.kv_attn_dim, has_bias=False)
+        self.q_proj = make_replicated(config, config.hidden_size, self.qo_attn_dim)
+        self.k_proj = make_replicated(config, config.hidden_size, self.kv_attn_dim)
 
         # Post-attention output gate. Both the IFM base and the primitive-ai NVFP4
         # export carry attention_gate_func="softplus", so it is always built here.
         # (A future variant without it would need a ModelConfig field first.)
-        self.gate_proj = LinearReplicated(
-            config.hidden_size, self.qo_attn_dim, has_bias=False
-        )
+        self.gate_proj = make_replicated(config, config.hidden_size, self.qo_attn_dim)
 
         rotary = config.rotary_config
         self.rotary = get_rope(
@@ -112,7 +110,7 @@ class _K2HorizonAttentionBase(BaseOP):
                 tuple(rotary.scaling.items()) if rotary.scaling else None
             ),
         )
-        self.o_proj = LinearReplicated(self.qo_attn_dim, config.hidden_size, has_bias=False)
+        self.o_proj = make_replicated(config, self.qo_attn_dim, config.hidden_size)
 
     def _qkv(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (q, k, v): q [N, num_q, head_dim] post rope, k [N, num_kv*hd]
@@ -139,7 +137,7 @@ class K2HorizonAttention(_K2HorizonAttentionBase):
 
     def __init__(self, config: ModelConfig, layer_id: int):
         super().__init__(config, layer_id)
-        self.v_proj = LinearReplicated(config.hidden_size, self.kv_attn_dim, has_bias=False)
+        self.v_proj = make_replicated(config, config.hidden_size, self.kv_attn_dim)
 
     def _qkv(self, x: torch.Tensor):
         positions = get_global_ctx().batch.positions

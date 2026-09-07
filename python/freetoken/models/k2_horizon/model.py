@@ -97,16 +97,39 @@ class K2HorizonModel(BaseOP):
         x, _ = self.norm.forward_add_residual(x, residual)
         return x
 
+class K2HorizonFp8LMHead(ParallelLMHead):
+    """W8A16 lm_head (fp8-e4m3 weight + per-row scale, quantized at load)."""
+
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__(num_embeddings, embedding_dim, tie_word_embeddings=False)
+        self.weight = torch.empty(num_embeddings, embedding_dim, dtype=torch.float8_e4m3fn)
+        self.weight_scale = torch.empty(num_embeddings, dtype=torch.float32)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.kernel.triton.fp8_pertensor_linear import fp8_pertensor_linear
+
+        batch = get_global_ctx().batch
+        if batch.is_prefill:
+            indices = batch.attn_metadata.get_last_indices(batch.size)
+            x = x[indices].contiguous()
+        return fp8_pertensor_linear(x, self.weight, self.weight_scale)
+
 
 class K2HorizonForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig):
         self.model = K2HorizonModel(config)
-        self.lm_head = ParallelLMHead(
-            num_embeddings=config.vocab_size,
-            embedding_dim=config.hidden_size,
-            tie_word_embeddings=config.tie_word_embeddings,
-            tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
-        )
+        if config.lm_head_quant == "fp8_pertensor" and not config.tie_word_embeddings:
+            self.lm_head = K2HorizonFp8LMHead(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+            )
+        else:
+            self.lm_head = ParallelLMHead(
+                num_embeddings=config.vocab_size,
+                embedding_dim=config.hidden_size,
+                tie_word_embeddings=config.tie_word_embeddings,
+                tied_embedding=self.model.embed_tokens if config.tie_word_embeddings else None,
+            )
         super().__init__()
 
     def forward(self) -> torch.Tensor:
